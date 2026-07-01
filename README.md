@@ -87,6 +87,32 @@ chmod 600 /etc/gb-travio-realtime-bridge.env
 sudo systemctl start gb-travio-realtime-bridge
 ```
 
+## On-demand single-record refresh
+
+For ops use, when someone spots a stale row:
+
+```bash
+# Refresh one reservation (fetches from Travio, upserts to gb-udb)
+PYTHONPATH=src python3 -m src.refresh_one reservation 1107373
+
+# Refresh one master_data record
+PYTHONPATH=src python3 -m src.refresh_one master_data 412156
+
+# Dry-run (fetch but don't write) + JSON output for scripting
+PYTHONPATH=src python3 -m src.refresh_one reservation 1107373 --dry-run --json
+```
+
+Exit codes are scriptable: `0` success, `2` bad args, `3` Travio fetch error,
+`4` record not found in Travio, `5` Neon write error.
+
+Example usage in a triage script:
+
+```bash
+if PYTHONPATH=src python3 -m src.refresh_one reservation "$ID" --json | jq -e '.action == "created" or .action == "updated"'; then
+  echo "Refreshed reservation $ID"
+fi
+```
+
 ## Operational notes
 
 - **No public port required.** This service is an outbound-only client.
