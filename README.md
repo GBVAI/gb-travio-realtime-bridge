@@ -113,6 +113,42 @@ if PYTHONPATH=src python3 -m src.refresh_one reservation "$ID" --json | jq -e '.
 fi
 ```
 
+## Date-range backfill
+
+For catching up a range of dates (e.g. after a long bridge outage, or
+specifically to refresh the 02:49-06:xx window between Travio's backup
+and the nightly mirror):
+
+```bash
+# Backfill everything booked 2026-07-01
+PYTHONPATH=src python3 -m src.backfill --since=2026-07-01 --until=2026-07-01
+
+# Multi-day window with higher concurrency
+PYTHONPATH=src python3 -m src.backfill --since=2026-06-29 --until=2026-07-01 \
+    --concurrency=8 --per-page=500
+
+# Explicit list of IDs (skips the page-walk discovery)
+PYTHONPATH=src python3 -m src.backfill --ids=1107373,1107374,1107375
+
+# Dry-run to see what would be touched
+PYTHONPATH=src python3 -m src.backfill --since=2026-07-01 --until=2026-07-01 \
+    --dry-run --json
+```
+
+**Why page-walk instead of date-filter?** Travio's `filters=` and `sort_by=`
+query parameters are currently broken server-side (every value shape
+returns HTTP 500 with "filters.push is not a function" or "Bad sort by
+format"). The only working navigation primitive is `page` + `per_page` in
+default (ascending-by-id) order. The backfill walks backwards from the last
+page and stops as soon as it crosses below `since`. The `date` field is
+roughly monotonic with id (page 2200 = 2026-07-01, page 2000 = 2026-01,
+page 1000 = 2019), so the walk converges fast: a 1-day backfill scans
+~3 pages and finishes in ~30s of discovery + N minutes of per-id re-fetch
+depending on `TRAVIO_REQUESTS_PER_MINUTE`.
+
+Exit codes: `0` success, `2` bad args, `3` Travio fetch error, `5` Neon
+write error (any failures).
+
 ## Operational notes
 
 - **No public port required.** This service is an outbound-only client.
