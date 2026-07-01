@@ -1,0 +1,33 @@
+[Unit]
+Description=GB Travio Realtime Bridge (poll webhooks + direct Travio API → gb-udb)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/gb-travio-realtime-bridge
+EnvironmentFile=/etc/gb-travio-realtime-bridge.env
+Environment=PYTHONPATH=/opt/gb-travio-realtime-bridge/src
+ExecStart=/usr/bin/python3 -m main
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+# Persistent state
+StateDirectory=gb-travio-realtime-bridge
+LogsDirectory=gb-travio-realtime-bridge
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+
+# Logging to journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gb-travio-realtime-bridge
+
+[Install]
+WantedBy=multi-user.target
