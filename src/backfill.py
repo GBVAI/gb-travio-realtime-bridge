@@ -9,10 +9,9 @@ This tool implements the same pagination strategy as
 `gbbookingincentives/automations/src/jobs/smart-sync.ts`:
 
   1. If `--ids` is given, skip discovery and re-fetch each ID directly.
-  2. Otherwise, page-walk backwards from the last page (newest IDs are at the
-     end of ascending order), keeping IDs whose `date` field falls in the
-     requested [since, until] range. Stop early when N consecutive pages
-     return no in-range IDs.
+  2. Otherwise, page-walk backwards from the last page (highest/default-latest
+     page in ascending order), keeping IDs whose `date` field falls in the
+     requested [since, until] range. Stop once we cross below `since`.
   3. For each collected ID, re-fetch the full record via get_reservation
      and upsert into Neon.
 
@@ -36,7 +35,7 @@ import json
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 # Make src/ importable when run as `python3 -m src.backfill` from project root
@@ -72,6 +71,11 @@ def parse_args() -> argparse.Namespace:
     if not args.ids and not (args.since and args.until):
         p.error("either --ids OR (--since AND --until) is required")
 
+    if args.ids:
+        bad_ids = [s.strip() for s in args.ids.split(",") if s.strip() and not s.strip().isdigit()]
+        if bad_ids:
+            p.error(f"--ids must be a comma-separated list of integers; bad values: {', '.join(bad_ids)}")
+
     if args.since:
         try:
             datetime.strptime(args.since, "%Y-%m-%d")
@@ -106,12 +110,14 @@ def discover_ids_by_date(
     is in [since, until] (inclusive). Default order is ascending by id, so the
     newest IDs are at the END — we start at the last page and walk backwards.
 
-    Early-exit strategy: as soon as a page has NO in-range IDs AND the
-    newest date on that page is < since, we've crossed the boundary. Note
+    Early-exit strategy: each page exposes a min/max booking date. If the
+    entire page is newer than `until`, keep walking backward. If the entire
+    page is older than `since`, we've crossed the boundary and can stop. Note
     that `date` is the booking creation date which is roughly monotonic with
     id for active reservations, but in principle could diverge for very old
-    reservations that were updated. We also stop after 5 consecutive
-    empty pages as a safety net.
+    reservations that were updated. We also stop after 5 consecutive pages
+    whose dates are within/near the range but still contain no hits as a
+    safety net.
     """
     # First, learn the total page count from a per_page=1 peek
     log.info("discover_peeking_total", per_page=1)
@@ -141,24 +147,34 @@ def discover_ids_by_date(
         if not items:
             break
 
-        # Per-date in-range check
+        # Per-date in-range check. Page items are ascending by id and usually
+        # also roughly ascending by booking date, but use min/max date to avoid
+        # relying on item ordering inside the page.
+        page_dates = [str(r.get("date", ""))[:10] for r in items if r.get("date")]
+        page_min_date = min(page_dates) if page_dates else ""
+        page_max_date = max(page_dates) if page_dates else ""
         in_range = [r for r in items if _date_in_range(r.get("date"), since, until)]
 
         if in_range:
             found_ids.extend(r["id"] for r in in_range)
             consecutive_empty = 0
         else:
-            consecutive_empty += 1
-            # Strong early-exit: if the OLDEST item on this page (which is
-            # the FIRST item because pages are ascending by id) is already
-            # older than `since`, the rest of the pages behind it will be
-            # even older. We've crossed the boundary; stop.
-            oldest_date_on_page = items[0].get("date", "")[:10]
-            if oldest_date_on_page and oldest_date_on_page < since:
+            # If the entire page is newer than the requested window, keep
+            # walking backwards; these are not "empty" in the stop-threshold
+            # sense, they are just above the range.
+            if page_min_date and page_min_date > until:
+                log.info("discover_page_newer_than_range",
+                         page=page, page_min_date=page_min_date,
+                         page_max_date=page_max_date, until=until)
+            # If the entire page is older than the requested window, we have
+            # crossed the boundary. The remaining pages will be older still.
+            elif page_max_date and page_max_date < since:
                 log.info("discover_crossed_boundary",
-                         page=page, oldest_date=oldest_date_on_page, since=since,
+                         page=page, page_max_date=page_max_date, since=since,
                          found_so_far=len(found_ids))
                 break
+            else:
+                consecutive_empty += 1
 
         if max_ids and len(found_ids) >= max_ids:
             log.info("discover_max_ids_reached", max_ids=max_ids)
